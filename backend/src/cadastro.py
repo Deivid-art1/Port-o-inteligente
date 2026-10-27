@@ -79,6 +79,9 @@ def quadros_de_origem(origem):
         return quadros_de_pasta(origem)
     if not os.path.isfile(origem):
         raise FileNotFoundError(origem)
+    if origem.lower().endswith((".jpg", ".jpeg", ".png")):
+        img = cv2.imread(origem)
+        return [img] if img is not None else []
     return quadros_de_video(origem)
 
 
@@ -163,6 +166,14 @@ def _principal():
                 quadros[grupo] = quadros_de_origem(caminho)
 
     cadastrar(a.nome, fatores, quadros, codigo)
+
+
+def remover(cid):
+    cadastros = carregar()
+    restantes = [c for c in cadastros if c["id"] != cid]
+    if len(restantes) == len(cadastros):
+        raise KeyError(cid)
+    _salvar(restantes)
 
 
 if __name__ == "__main__":

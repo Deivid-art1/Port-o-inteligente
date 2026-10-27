@@ -29,9 +29,10 @@ class Identidade:
         self._scores = {}         # (nome, fator) -> última similaridade, para calibrar
         self._ultimo_acesso = {}  # cad_id -> instante da última liberação
         self._ultimo_calculo = 0.0
+        self._face_streak = {}
 
     def processar(self, frame, agora=None):
-        """Devolve uma decisão de acesso quando os fatores de um cadastro são cumpridos, senão None."""
+        """Só valida o rosto após 3 verificações consecutivas."""
         agora = time.monotonic() if agora is None else agora
         if not self.cadastros or agora - self._ultimo_calculo < INTERVALO_S:
             return None
@@ -43,25 +44,58 @@ class Identidade:
         emb_rosto = extrair_rosto(frame) if "rosto" in usa else None
         vec_app = aparencia(frame) if usa & {"veiculo", "capacete"} else None
 
-        for cad in self.cadastros:
-            cid, nome, exigidos = cad["id"], cad["nome"], cad["fatores_exigidos"]
+        # A evidência facial precisa ser renovada a cada análise.
+        for chave in list(self._evidencias):
+            if chave[1] == "rosto":
+                self._evidencias.pop(chave, None)
 
-            if emb_rosto is not None and "rosto" in exigidos:
+        if emb_rosto is None:
+            self._face_streak.clear()
+        else:
+            correspondencias = set()
+
+            for cad in self.cadastros:
+                cid, nome, exigidos = cad["id"], cad["nome"], cad["fatores_exigidos"]
+                if "rosto" not in exigidos:
+                    continue
+
                 s = _melhor(emb_rosto, cad["rosto"])
-                self._scores[(nome, "rosto")] = s
-                if s >= LIMIAR_ROSTO:
-                    self._evidencias[(cid, "rosto")] = agora
+                self._scores[(nome, "rosto")] = float(s)
 
-            if vec_app is not None:
+                if s >= LIMIAR_ROSTO:
+                    correspondencias.add(cid)
+                    anterior = self._face_streak.get(cid)
+                    if anterior and agora - anterior["tempo"] <= 1.5:
+                        contagem = anterior["contagem"] + 1
+                    else:
+                        contagem = 1
+
+                    self._face_streak[cid] = {
+                        "contagem": contagem,
+                        "tempo": agora,
+                    }
+
+                    if contagem >= 3:
+                        self._evidencias[(cid, "rosto")] = agora
+
+            # Um cadastro que não corresponde ao rosto atual perde a sequência.
+            for cid in list(self._face_streak):
+                if cid not in correspondencias:
+                    self._face_streak.pop(cid, None)
+
+        if vec_app is not None:
+            for cad in self.cadastros:
+                cid, nome, exigidos = cad["id"], cad["nome"], cad["fatores_exigidos"]
                 for grupo in ("veiculo", "capacete"):
                     if grupo in exigidos:
-                        s = _melhor(vec_app, cad[grupo])
+                        s = float(_melhor(vec_app, cad[grupo]))
                         self._scores[(nome, grupo)] = s
                         if s >= LIMIAR_APARENCIA:
                             self._evidencias[(cid, grupo)] = agora
 
-            if "gesto" in exigidos and cad.get("codigo") and self.sequencia.termina_com(cad["codigo"]):
-                self._evidencias[(cid, "gesto")] = agora
+        for cad in self.cadastros:
+            if "gesto" in cad["fatores_exigidos"] and cad.get("codigo") and self.sequencia.termina_com(cad["codigo"]):
+                self._evidencias[(cad["id"], "gesto")] = agora
                 self.sequencia.limpar()
 
         return self._decidir(agora)
@@ -78,6 +112,12 @@ class Identidade:
                 return {"status": "acesso", "cadastro": cad["nome"], "id": cid,
                         "fatores": list(exigidos), "vivacidade": False}
         return None
+
+    def recarregar(self):
+        """Relê os cadastros do disco (chamado após cadastrar ou remover pelo painel)."""
+        self.cadastros = carregar()
+        self._evidencias.clear()
+        self._ultimo_acesso.clear()
 
     def estado(self, agora=None):
         agora = time.monotonic() if agora is None else agora

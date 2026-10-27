@@ -24,15 +24,15 @@
           
           <div class="p-4 rounded-lg bg-slate-900/60 border border-slate-700/50 mb-4">
             <p class="text-xs text-slate-400 uppercase tracking-wider mb-1">Status da Predição</p>
-            <p class="text-2xl font-black" :class="iaData.classe.includes('Autorizado') ? 'text-emerald-400' : 'text-rose-400'">
-              {{ iaData.classe || 'Aguardando...' }}
+            <p class="text-2xl font-black" :class="(iaData?.classe || '').includes('Autorizado') ? 'text-emerald-400' : 'text-rose-400'">
+              {{ iaData?.classe || 'Aguardando...' }}
             </p>
           </div>
 
           <div class="p-4 rounded-lg bg-slate-900/60 border border-slate-700/50">
-            <p class="text-xs text-slate-400 uppercase tracking-wider mb-1">Confiança do Modelo</p>
+            <p class="text-xs text-slate-400 uppercase tracking-wider mb-1">Similaridade facial (0–1)</p>
             <p class="text-2xl font-bold text-amber-400">
-              {{ iaData.confianca ? iaData.confianca + '%' : '0%' }}
+              {{ iaData?.confianca ?? '—' }}
             </p>
           </div>
         </div>
@@ -51,7 +51,8 @@ import { ref, onMounted, onUnmounted } from 'vue'
 const cameraImage = ref('')
 const statusText = ref('Desconectado')
 const statusClass = ref('bg-rose-500/20 text-rose-400 border border-rose-500/30')
-const iaData = ref({ classe: '', confianca: 0 })
+const iaData = ref({ classe: 'Aguardando reconhecimento facial', confianca: null })
+const ultimoReconhecimento = ref('')
 let socket = null
 
 onMounted(() => {
@@ -63,10 +64,49 @@ onMounted(() => {
   }
 
   socket.onmessage = (event) => {
-    const data = JSON.parse(event.data)
-    cameraImage.value = data.image
-    iaData.value = data.analysis
+  const data = JSON.parse(event.data)
+
+  if (data.image) {
+    cameraImage.value = data.image.startsWith('data:')
+      ? data.image
+      : `data:image/jpeg;base64,${data.image}`
   }
+
+  const acesso = data.acesso
+  const resultado = String(data.resultado || '')
+  const nomeReconhecido = acesso?.cadastro ||
+    resultado.match(/^(?:Autorizado|Reconhecido):\\s*(.+)$/i)?.[1]
+
+  if (nomeReconhecido) {
+    ultimoReconhecimento.value = nomeReconhecido
+  } else {
+    ultimoReconhecimento.value = ''
+  }
+
+  const scores = data.identidade?.similaridades || {}
+  const evidencias = data.identidade?.evidencias_ativas || []
+  const rostoAtivo = evidencias.some(chave => chave.endsWith(':rosto'))
+
+  const valores = rostoAtivo
+    ? Object.entries(scores)
+        .filter(([chave]) => chave.endsWith(':rosto'))
+        .map(([, valor]) => Number(valor))
+        .filter(Number.isFinite)
+    : []
+
+  iaData.value = {
+    classe: acesso?.status === 'autorizado'
+      ? `Acesso autorizado: ${acesso.cadastro}`
+      : ultimoReconhecimento.value
+        ? `Último reconhecimento: ${ultimoReconhecimento.value}`
+        : (data.identidade?.evidencias_ativas?.length
+            ? 'Reconhecimento em análise'
+            : 'Aguardando reconhecimento facial'),
+    confianca: valores.length
+      ? Math.max(...valores).toFixed(3)
+      : null
+  }
+}
 
   socket.onclose = () => {
     statusText.value = 'Desconectado'

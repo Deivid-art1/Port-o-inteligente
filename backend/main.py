@@ -1,12 +1,16 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-import cv2
-import base64
+from fastapi.staticfiles import StaticFiles
 import asyncio
-from src.decisor import JanelaDecisao
-from src.camera import CameraStream
-from src.predictor import ImageClassifier
+import base64
+import cv2
+import json
+import numpy as np
 
+from src.camera import CameraStream
+from src.registro import Registro
+from src.motor import Motor
+from src.admin_api import ADMIN_DIR, criar_router
 
 app = FastAPI(title="API Portão Inteligente - IA")
 
@@ -19,44 +23,60 @@ app.add_middleware(
 )
 
 camera = CameraStream()
-classifier = ImageClassifier()
+registro = Registro()
+motor = Motor(camera, registro)
+motor.start()
 
 
 @app.get("/health")
 def health_check():
-    return {"status": "online", "model_loaded": classifier.has_model}
+    return {"status": "online", "face_recognition": "YuNet + SFace"}
 
 
 @app.websocket("/ws/stream")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("Cliente conectado ao WebSocket.")
-    decisor = JanelaDecisao()  # uma janela por conexão
+
     try:
         while True:
+            estado = motor.snapshot()
+
             frame = camera.get_frame()
-            if frame is None:
-                await asyncio.sleep(0.1)
-                continue
 
-            leitura = await asyncio.to_thread(classifier.predict_frame, frame)
-            decisor.adicionar(leitura["raw_value"])
-            analise = decisor.decidir()
+            if frame is not None:
+                sucesso, buffer = cv2.imencode(
+                    ".jpg",
+                    frame,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 70]
+                )
 
-            _, buffer = cv2.imencode(".jpg", frame)
-            frame_base64 = base64.b64encode(buffer).decode("utf-8")
+                if sucesso:
+                    estado["image"] = base64.b64encode(
+                        buffer.tobytes()
+                    ).decode("utf-8")
 
-            await websocket.send_json({
-                "image": f"data:image/jpeg;base64,{frame_base64}",
-                "analysis": analise,
-            })
-            await asyncio.sleep(0.05)
+            estado["analysis"] = {
+                "classe": estado.get("resultado", "Aguardando..."),
+                "confianca": estado.get("pct_rosa") or 0
+            }
+
+            def converter_numpy(obj):
+                if isinstance(obj, np.generic):
+                    return obj.item()
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                raise TypeError(f"Tipo não serializável: {type(obj).__name__}")
+
+            await websocket.send_text(
+                json.dumps(estado, default=converter_numpy, ensure_ascii=False)
+            )
+            await asyncio.sleep(0.2)
 
     except WebSocketDisconnect:
         print("Cliente desconectado do WebSocket.")
-    except Exception as e:
-        print(f"Erro no WebSocket: {type(e).__name__}: {e}")
-        try:
-            await websocket.close()
-        except Exception:
-            pass
+
+
+# A ordem importa: a API vem antes do site, senão o /admin captura as rotas da API
+app.include_router(criar_router(registro, motor), prefix="/admin/api")
+app.mount("/admin", StaticFiles(directory=ADMIN_DIR, html=True), name="admin")
